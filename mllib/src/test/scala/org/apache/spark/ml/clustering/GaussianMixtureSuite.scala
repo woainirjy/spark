@@ -145,6 +145,7 @@ class GaussianMixtureSuite extends MLTest with DefaultReadWriteTest {
     assert(clusterSizes.length === k)
     assert(clusterSizes.sum === numRows)
     assert(clusterSizes.forall(_ >= 0))
+    assert(summary.numIter == 2)
 
     model.setSummary(None)
     assert(!model.hasSummary)
@@ -266,6 +267,16 @@ class GaussianMixtureSuite extends MLTest with DefaultReadWriteTest {
     // checking the cost is fine enough as a sanity check
     assert(trueLikelihood ~== doubleLikelihood absTol 1e-6)
     assert(trueLikelihood ~== floatLikelihood absTol 1e-6)
+  }
+
+  test("prediction on single instance") {
+    val gmm = new GaussianMixture().setSeed(123L)
+    val model = gmm.fit(dataset)
+    testClusteringModelSinglePrediction(model, model.predict, dataset,
+      model.getFeaturesCol, model.getPredictionCol)
+
+    testClusteringModelSingleProbabilisticPrediction(model, model.predictProbability, dataset,
+      model.getFeaturesCol, model.getProbabilityCol)
   }
 }
 

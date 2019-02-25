@@ -44,8 +44,6 @@ import org.apache.spark.sql.execution.streaming._
 import org.apache.spark.sql.execution.streaming.continuous.{ContinuousExecution, EpochCoordinatorRef, IncrementAndGetEpoch}
 import org.apache.spark.sql.execution.streaming.sources.MemorySinkV2
 import org.apache.spark.sql.execution.streaming.state.StateStore
-import org.apache.spark.sql.internal.SQLConf
-import org.apache.spark.sql.sources.v2.DataSourceOptions
 import org.apache.spark.sql.streaming.StreamingQueryListener._
 import org.apache.spark.sql.test.SharedSQLContext
 import org.apache.spark.util.{Clock, SystemClock, Utils}
@@ -80,8 +78,11 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
   implicit val defaultSignaler: Signaler = ThreadSignaler
 
   override def afterAll(): Unit = {
-    super.afterAll()
-    StateStore.stop() // stop the state store maintenance thread and unload store providers
+    try {
+      super.afterAll()
+    } finally {
+      StateStore.stop() // stop the state store maintenance thread and unload store providers
+    }
   }
 
   protected val defaultTrigger = Trigger.ProcessingTime(0)
@@ -292,8 +293,10 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
 
   /** Execute arbitrary code */
   object Execute {
-    def apply(func: StreamExecution => Any): AssertOnQuery =
-      AssertOnQuery(query => { func(query); true }, "Execute")
+    def apply(name: String)(func: StreamExecution => Any): AssertOnQuery =
+      AssertOnQuery(query => { func(query); true }, "name")
+
+    def apply(func: StreamExecution => Any): AssertOnQuery = apply("Execute")(func)
   }
 
   object AwaitEpoch {
@@ -338,8 +341,7 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
     var currentStream: StreamExecution = null
     var lastStream: StreamExecution = null
     val awaiting = new mutable.HashMap[Int, Offset]() // source index -> offset to wait for
-    val sink = if (useV2Sink) new MemorySinkV2
-      else new MemorySink(stream.schema, outputMode, DataSourceOptions.empty())
+    val sink = if (useV2Sink) new MemorySinkV2 else new MemorySink(stream.schema, outputMode)
     val resetConfValues = mutable.Map[String, Option[String]]()
     val defaultCheckpointLocation =
       Utils.createTempDir(namePrefix = "streaming.metadata").getCanonicalPath
@@ -467,7 +469,7 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
       // Block until all data added has been processed for all the source
       awaiting.foreach { case (sourceIndex, offset) =>
         failAfter(streamingTimeout) {
-          currentStream.awaitOffset(sourceIndex, offset)
+          currentStream.awaitOffset(sourceIndex, offset, streamingTimeout.toMillis)
           // Make sure all processing including no-data-batches have been executed
           if (!currentStream.triggerClock.isInstanceOf[StreamManualClock]) {
             currentStream.processAllAvailable()
@@ -514,7 +516,7 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
       logInfo(s"Processing test stream action: $action")
       action match {
         case StartStream(trigger, triggerClock, additionalConfs, checkpointLocation) =>
-          verify(currentStream == null, "stream already running")
+          verify(currentStream == null || !currentStream.isActive, "stream already running")
           verify(triggerClock.isInstanceOf[SystemClock]
             || triggerClock.isInstanceOf[StreamManualClock],
             "Use either SystemClock or StreamManualClock to start the stream")
@@ -685,8 +687,14 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
             def findSourceIndex(plan: LogicalPlan): Option[Int] = {
               plan
                 .collect {
+                  // v1 source
                   case r: StreamingExecutionRelation => r.source
-                  case r: StreamingDataSourceV2Relation => r.reader
+                  // v2 source
+                  case r: StreamingDataSourceV2Relation => r.stream
+                  // We can add data to memory stream before starting it. Then the input plan has
+                  // not been processed by the streaming engine and contains `StreamingRelationV2`.
+                  case r: StreamingRelationV2 if r.sourceName == "memory" =>
+                    r.table.asInstanceOf[MemoryStreamTable].stream
                 }
                 .zipWithIndex
                 .find(_._1 == source)
@@ -735,7 +743,10 @@ trait StreamTest extends QueryTest with SharedSQLContext with TimeLimits with Be
           }
 
         case CheckAnswerRowsByFunc(globalCheckFunction, lastOnly) =>
-          val sparkAnswer = fetchStreamAnswer(currentStream, lastOnly)
+          val sparkAnswer = currentStream match {
+            case null => fetchStreamAnswer(lastStream, lastOnly)
+            case s => fetchStreamAnswer(s, lastOnly)
+          }
           try {
             globalCheckFunction(sparkAnswer)
           } catch {

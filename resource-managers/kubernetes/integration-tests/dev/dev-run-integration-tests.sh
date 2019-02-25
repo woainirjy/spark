@@ -16,9 +16,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 #
-TEST_ROOT_DIR=$(git rev-parse --show-toplevel)/resource-managers/kubernetes/integration-tests
-
-cd "${TEST_ROOT_DIR}"
+set -xo errexit
+TEST_ROOT_DIR=$(git rev-parse --show-toplevel)
 
 DEPLOY_MODE="minikube"
 IMAGE_REPO="docker.io/kubespark"
@@ -27,6 +26,15 @@ IMAGE_TAG="N/A"
 SPARK_MASTER=
 NAMESPACE=
 SERVICE_ACCOUNT=
+CONTEXT=
+INCLUDE_TAGS="k8s"
+EXCLUDE_TAGS=
+MVN="$TEST_ROOT_DIR/build/mvn"
+
+SCALA_VERSION=$("$MVN" help:evaluate -Dexpression=scala.binary.version 2>/dev/null\
+    | grep -v "INFO"\
+    | grep -v "WARNING"\
+    | tail -n 1)
 
 # Parse arguments
 while (( "$#" )); do
@@ -59,6 +67,18 @@ while (( "$#" )); do
       SERVICE_ACCOUNT="$2"
       shift
       ;;
+    --context)
+      CONTEXT="$2"
+      shift
+      ;;
+    --include-tags)
+      INCLUDE_TAGS="k8s,$2"
+      shift
+      ;;
+    --exclude-tags)
+      EXCLUDE_TAGS="$2"
+      shift
+      ;;
     *)
       break
       ;;
@@ -66,13 +86,12 @@ while (( "$#" )); do
   shift
 done
 
-cd $TEST_ROOT_DIR
-
 properties=(
   -Dspark.kubernetes.test.sparkTgz=$SPARK_TGZ \
   -Dspark.kubernetes.test.imageTag=$IMAGE_TAG \
   -Dspark.kubernetes.test.imageRepo=$IMAGE_REPO \
-  -Dspark.kubernetes.test.deployMode=$DEPLOY_MODE
+  -Dspark.kubernetes.test.deployMode=$DEPLOY_MODE \
+  -Dtest.include.tags=$INCLUDE_TAGS
 )
 
 if [ -n $NAMESPACE ];
@@ -85,9 +104,19 @@ then
   properties=( ${properties[@]} -Dspark.kubernetes.test.serviceAccountName=$SERVICE_ACCOUNT )
 fi
 
+if [ -n $CONTEXT ];
+then
+  properties=( ${properties[@]} -Dspark.kubernetes.test.kubeConfigContext=$CONTEXT )
+fi
+
 if [ -n $SPARK_MASTER ];
 then
   properties=( ${properties[@]} -Dspark.kubernetes.test.master=$SPARK_MASTER )
 fi
 
-../../../build/mvn integration-test ${properties[@]}
+if [ -n $EXCLUDE_TAGS ];
+then
+  properties=( ${properties[@]} -Dtest.exclude.tags=$EXCLUDE_TAGS )
+fi
+
+$TEST_ROOT_DIR/build/mvn integration-test -f $TEST_ROOT_DIR/pom.xml -pl resource-managers/kubernetes/integration-tests -am -Pscala-$SCALA_VERSION -Pkubernetes -Pkubernetes-integration-tests ${properties[@]}
